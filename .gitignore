@@ -1,3 +1,74 @@
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+
+# Дополнительные исключения для ChromaDB
+data/chroma/
+.chroma/
+
+# Файлы с ключами API и секретами
+credentials/
+*credentials*
+*.pem
+*.key
+
+# Временные файлы Telegram
+*.session
+*.session-journal
+
+# Кэш и временные файлы
+.tmp/
+tmp/
+temp/
+.cache/
+
+# Файлы с логами Telegram
+*.log.*
+telegrambot.log*
+
+# Дампы базы данных
+*.dump
+*.sql
+*.sqlite
+*.sqlite3
+*.db
+
+# Файлы профилирования и бенчмаркинга
+profile_results/
+*.prof
+
+# Локальные скрипты для тестирования
+local_test_*.py
+scratch*.py
+
+# Папка с векторными эмбеддингами
+embeddings/
+vector_store/
+
+# Виртуальное окружение Poetry (дополнительно)
+.poetry-cache/
+
+# Документация, генерируемая автоматически
+docs/build/
+docs/_build/
+docs/auto_examples/
+docs/generated/
+
+# Jupyter Notebooks (если используются для тестирования)
+.ipynb_checkpoints/
+notebooks/
+
+# Файлы конфигурации для IDE (дополнительно)
+.spyderproject
+.spyproject
+.ropeproject
+.projectile
+.dir-locals.el
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -105,7 +176,7 @@ ipython_config.py
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
 #   commonly ignored for libraries.
 #   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
+poetry.lock
 
 # pdm
 #   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
