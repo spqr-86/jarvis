@@ -10,6 +10,33 @@ from jarvis.config import CHROMA_PERSIST_DIRECTORY, HUGGINGFACE_API_KEY
 logger = logging.getLogger(__name__)
 
 
+def clean_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Очищает метаданные от значений None, заменяя их на пустые строки.
+    ChromaDB требует, чтобы все значения были str, int, float или bool.
+    
+    Args:
+        metadata: Исходные метаданные
+        
+    Returns:
+        Очищенные метаданные
+    """
+    if not metadata:
+        return {}
+        
+    cleaned = {}
+    for key, value in metadata.items():
+        if value is None:
+            cleaned[key] = ""  # Заменяем None на пустую строку
+        elif isinstance(value, (str, int, float, bool)):
+            cleaned[key] = value
+        else:
+            # Преобразуем другие типы в строки
+            cleaned[key] = str(value)
+    
+    return cleaned
+
+
 class VectorStoreService:
     """Сервис для работы с векторной базой данных."""
     
@@ -69,7 +96,12 @@ class VectorStoreService:
             Список идентификаторов добавленных текстов
         """
         try:
-            return self.db.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+            # Очищаем метаданные от None значений
+            cleaned_metadatas = None
+            if metadatas:
+                cleaned_metadatas = [clean_metadata(meta) for meta in metadatas]
+            
+            return self.db.add_texts(texts=texts, metadatas=cleaned_metadatas, ids=ids)
         except Exception as e:
             logger.error(f"Ошибка при добавлении текстов в ChromaDB: {str(e)}")
             raise
@@ -92,7 +124,12 @@ class VectorStoreService:
             Список документов с метаданными и содержимым
         """
         try:
-            docs = self.db.similarity_search(query=query, k=k, filter=filter)
+            # Очищаем фильтр от None значений
+            cleaned_filter = None
+            if filter:
+                cleaned_filter = clean_metadata(filter)
+                
+            docs = self.db.similarity_search(query=query, k=k, filter=cleaned_filter)
             return [
                 {
                     "content": doc.page_content,

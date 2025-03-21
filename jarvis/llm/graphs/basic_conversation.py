@@ -1,7 +1,7 @@
 """Базовый граф разговора с использованием LangGraph."""
 
 import logging
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, TypedDict
 from enum import Enum
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -23,6 +23,21 @@ class ConversationState(Enum):
     TASK_CREATION = "task_creation"
     GENERAL_RESPONSE = "general_response"
     END = "end"
+
+
+# Определяем схему состояния для StateGraph
+class ConversationStateDict(TypedDict, total=False):
+    """Определение схемы состояния для графа разговора."""
+    
+    user_input: str
+    chat_history: List[Dict[str, str]]
+    intent: str
+    intent_confidence: float
+    entities: Dict[str, Any]
+    task: Dict[str, Any]
+    response: str
+    task_id: Optional[str]
+    success: bool
 
 
 class ConversationGraph:
@@ -47,8 +62,8 @@ class ConversationGraph:
     
     def _build_graph(self) -> StateGraph:
         """Создает и возвращает граф состояний разговора."""
-        # Определяем граф с начальным состоянием
-        graph = StateGraph()
+        # Определяем граф с начальным состоянием и схемой состояния
+        graph = StateGraph(state_schema=ConversationStateDict)
         
         # Добавляем узлы в граф
         graph.add_node(ConversationState.START.value, self._start_node)
@@ -65,8 +80,8 @@ class ConversationGraph:
             ConversationState.INTENT_CLASSIFICATION.value,
             self._route_by_intent,
             {
-                ConversationState.TASK_EXTRACTION.value: "task_creation",
-                ConversationState.GENERAL_RESPONSE.value: "general"
+                ConversationState.TASK_EXTRACTION.value: "task_extraction",
+                ConversationState.GENERAL_RESPONSE.value: "general_response"
             }
         )
         
@@ -82,7 +97,7 @@ class ConversationGraph:
         
         return graph.compile()
     
-    async def _start_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def _start_node(self, state: ConversationStateDict) -> ConversationStateDict:
         """
         Начальный узел графа.
         
@@ -95,7 +110,7 @@ class ConversationGraph:
         # Просто передаем состояние дальше, не изменяя его
         return state
     
-    async def _classify_intent(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def _classify_intent(self, state: ConversationStateDict) -> ConversationStateDict:
         """
         Узел классификации намерения пользователя.
         
@@ -127,7 +142,7 @@ class ConversationGraph:
             
             return state
     
-    def _route_by_intent(self, state: Dict[str, Any]) -> str:
+    def _route_by_intent(self, state: ConversationStateDict) -> str:
         """
         Определяет следующий узел на основе классифицированного намерения.
         
@@ -143,11 +158,11 @@ class ConversationGraph:
         task_related_intents = ["task_creation", "event_planning", "shopping_list"]
         
         if intent in task_related_intents:
-            return "task_creation"
+            return "task_extraction"  # Должно точно соответствовать ключу в add_conditional_edges
         else:
-            return "general"
+            return "general_response"  # Должно точно соответствовать ключу в add_conditional_edges
     
-    async def _extract_task(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def _extract_task(self, state: ConversationStateDict) -> ConversationStateDict:
         """
         Узел извлечения информации о задаче.
         
@@ -181,7 +196,7 @@ class ConversationGraph:
             
             return state
     
-    async def _create_task(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def _create_task(self, state: ConversationStateDict) -> ConversationStateDict:
         """
         Узел создания задачи.
         
@@ -194,6 +209,10 @@ class ConversationGraph:
         try:
             # Получаем информацию о задаче из состояния
             task_dict = state.get("task", {})
+            
+            # В оригинальном коде была ошибка: используется TaskExtractor, но он не импортирован
+            # Вместо этого, преобразуем словарь в TaskExtractor правильно
+            from jarvis.llm.chains.base import TaskExtractor
             task = TaskExtractor(**task_dict)
             
             # Создаем задачу
@@ -213,7 +232,7 @@ class ConversationGraph:
             
             return state
     
-    async def _generate_general_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def _generate_general_response(self, state: ConversationStateDict) -> ConversationStateDict:
         """
         Узел для генерации общего ответа на запрос пользователя.
         
@@ -257,23 +276,28 @@ class ConversationGraph:
             Результат обработки сообщения
         """
         # Создаем начальное состояние
-        initial_state = {
+        initial_state: ConversationStateDict = {
             "user_input": user_input,
             "chat_history": chat_history or []
         }
         
         # Запускаем граф
         try:
-            # Выполняем граф со начальным состоянием
+            # Выполняем граф с начальным состоянием
             final_state = await self.graph.ainvoke(initial_state)
             
-            # Возвращаем результат
+            # Проверяем, что в ответе есть все необходимые поля
+            if "response" not in final_state:
+                logger.warning("В конечном состоянии нет поля 'response', генерируем стандартный ответ")
+                final_state["response"] = "Извините, я не смог обработать ваш запрос."
+            
+            # Возвращаем результат с корректными значениями для метаданных
             return {
-                "response": final_state.get("response", "Извините, я не смог обработать ваш запрос."),
+                "response": final_state.get("response"),
                 "success": final_state.get("success", True),
-                "task_id": final_state.get("task_id"),
-                "intent": final_state.get("intent"),
-                "entities": final_state.get("entities")
+                "task_id": final_state.get("task_id", ""),  # Пустая строка вместо None
+                "intent": final_state.get("intent", "general_question"),
+                "entities": final_state.get("entities", {})
             }
         except Exception as e:
             logger.error(f"Ошибка при выполнении графа разговора: {str(e)}")

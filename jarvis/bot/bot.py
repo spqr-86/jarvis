@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # Инициализация сервисов
 llm_service = LLMService()
 vector_store = VectorStoreService()
+conversation_graph = ConversationGraph(llm_service)
 
 # Системное сообщение для LLM
 SYSTEM_MESSAGE = """
@@ -120,8 +121,13 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Временная реализация family_id (в реальном приложении это будет из базы данных)
     family_id = USER_SESSIONS[user_id].get("family_id") or f"family_{user_id}"
     
-    # Сохранение взаимодействия в векторной БД
+    # Сохранение взаимодействия в векторной БД с проверкой метаданных
     interaction_id = generate_uuid()
+    
+    # Обеспечиваем, что все поля метаданных имеют валидные значения
+    intent = result.get("intent", "unknown")
+    task_id = result.get("task_id", "")  # Пустая строка вместо None
+    
     await vector_store.add_texts(
         texts=[message_text, response], 
         metadatas=[
@@ -130,8 +136,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "user_id": str(user_id),
                 "type": "user_message",
                 "interaction_id": interaction_id,
-                "intent": result.get("intent"),
-                "has_task": bool(result.get("task_id"))
+                "intent": intent,
+                "has_task": bool(task_id != "")  # Преобразуем в булево значение
             },
             {
                 "family_id": family_id,
