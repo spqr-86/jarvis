@@ -16,6 +16,8 @@ from jarvis.llm.models import LLMService
 from jarvis.storage.vector.chroma_store import VectorStoreService
 from jarvis.utils.helpers import generate_uuid
 from jarvis.llm.graphs.basic_conversation import ConversationGraph
+from jarvis.bot.bot_integration import register_modules
+from jarvis.bot.bot_shopping_integration import ShoppingBotIntegration
 
 
 # Настройка логирования
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 llm_service = LLMService()
 vector_store = VectorStoreService()
 conversation_graph = ConversationGraph(llm_service)
+shopping_integration = ShoppingBotIntegration()
 
 # Системное сообщение для LLM
 SYSTEM_MESSAGE = """
@@ -71,7 +74,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Я могу помочь вам с различными задачами:\n\n"
         "• /start - Начать взаимодействие с ботом\n"
         "• /help - Показать это сообщение\n"
-        "• /clear - Очистить историю диалога\n\n"
+        "• /clear - Очистить историю диалога\n"
+        "• /shopping - Управление списком покупок\n"
+        "• /add - Добавить товар в список покупок\n"
+        "• /list - Показать текущий список покупок\n\n"
         "Вы также можете просто написать мне, что вам нужно, и я постараюсь помочь!"
     )
     await update.message.reply_text(help_text)
@@ -106,7 +112,14 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         chat_id=update.effective_chat.id, action="typing"
     )
     
-    # Обработка сообщения через граф разговора
+    # Сначала проверяем, связано ли сообщение со списком покупок
+    shopping_processed = await shopping_integration.process_shopping_message(update, context)
+    
+    # Если сообщение обработано модулем списка покупок, завершаем обработку
+    if shopping_processed:
+        return
+    
+    # Если не связано со списком покупок, обрабатываем через основной граф разговора
     result = await conversation_graph.process_message(
         user_input=message_text,
         chat_history=[{"role": msg["role"], "content": msg["content"]} for msg in chat_history[-5:]]  # Берем последние 5 сообщений
@@ -174,7 +187,10 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", clear_command))
     
-    # Добавляем обработчик текстовых сообщений
+    # Регистрируем модули функциональности (списки покупок и др.)
+    register_modules(application)
+    
+    # Добавляем обработчик текстовых сообщений (должен быть последним для обработки всех остальных сообщений)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
     
     # Добавляем обработчик ошибок
