@@ -18,6 +18,7 @@ from jarvis.utils.helpers import generate_uuid
 from jarvis.llm.graphs.basic_conversation import ConversationGraph
 from jarvis.bot.bot_integration import register_modules
 from jarvis.bot.bot_shopping_integration import ShoppingBotIntegration
+from jarvis.bot.bot_budget_integration import BudgetBotIntegration
 
 
 # Настройка логирования
@@ -31,6 +32,7 @@ llm_service = LLMService()
 vector_store = VectorStoreService()
 conversation_graph = ConversationGraph(llm_service)
 shopping_integration = ShoppingBotIntegration()
+budget_integration = BudgetBotIntegration()
 
 # Системное сообщение для LLM
 SYSTEM_MESSAGE = """
