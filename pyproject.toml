@@ -38,3 +38,7 @@ mypy = "^1.15.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+sqlalchemy = "^2.0.23"
+psycopg2-binary = "^2.9.9"  # PostgreSQL adapter
+alembic = "^1.12.1"

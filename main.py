@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jarvis.config import validate_config
 from jarvis.bot.bot import run_bot
+from jarvis.storage.database import engine, Base
 
 # Настройка логирования
 logging.basicConfig(
@@ -35,6 +36,8 @@ def main():
             error_msg += f"- {var}\n"
         logger.error(error_msg)
         sys.exit(1)
+    
+    Base.metadata.create_all(bind=engine)
     
     # Создаем директории, необходимые для работы приложения
     Path("./data/chroma").mkdir(parents=True, exist_ok=True)

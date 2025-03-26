@@ -27,6 +27,8 @@ CHROMA_PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma"
 # По умолчанию используем Groq для разработки
 DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "groq")
 
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/jarvis")
+
 # Проверка обязательных переменных
 def validate_config() -> Dict[str, Optional[str]]:
     """Проверяет наличие обязательных переменных конфигурации."""

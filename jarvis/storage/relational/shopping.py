@@ -4,10 +4,18 @@
 
 import logging
 from datetime import datetime
+from uuid import uuid4
+
+from sqlalchemy.orm import Session
+from sqlalchemy import and_
+
 from typing import List, Optional, Dict, Any, Tuple
 
-from jarvis.core.models.shopping import ShoppingList, ShoppingItem, ItemCategory, ItemPriority
-from jarvis.utils.helpers import generate_uuid
+from jarvis.storage.database import get_db_session
+from jarvis.storage.relational.models.shopping import ShoppingList, ShoppingItem, ItemCategoryEnum, ItemPriorityEnum
+from jarvis.core.models.shopping import ShoppingList as ShoppingListModel
+from jarvis.core.models.shopping import ShoppingItem as ShoppingItemModel
+from jarvis.core.models.shopping import ItemCategory, ItemPriority
 
 logger = logging.getLogger(__name__)
 
@@ -15,80 +23,96 @@ logger = logging.getLogger(__name__)
 class ShoppingListRepository:
     """Репозиторий для работы со списками покупок."""
     
-    def __init__(self, db_connection=None):
+    def __init__(self, db: Session = None):
         """
-        Инициализация репозитория списков покупок.
+        Initialize the repository with a database session.
         
         Args:
-            db_connection: Подключение к базе данных (в будущем реализации)
+            db: Database session (if None, will use dependency injection)
         """
-        # В MVP будем использовать in-memory хранилище
-        # В будущем здесь будет интеграция с реальной БД
-        self._db = {}  # Dict[list_id, ShoppingList]
-        self._db_connection = db_connection
+        self._db = db or next(get_db_session())
+
+    def _to_model(self, db_list: ShoppingList) -> ShoppingListModel:
+        """Convert database entity to domain model."""
+        items = []
+        for db_item in db_list.items:
+            item = ShoppingItemModel(
+                id=db_item.id,
+                name=db_item.name,
+                quantity=db_item.quantity,
+                unit=db_item.unit,
+                category=ItemCategory(db_item.category.value),
+                priority=ItemPriority(db_item.priority.value),
+                assigned_to=db_item.assigned_to,
+                is_purchased=db_item.is_purchased,
+                notes=db_item.notes,
+                created_at=db_item.created_at
+            )
+            if db_item.updated_at:
+                item.updated_at = db_item.updated_at
+            items.append(item)
+            
+        shopping_list = ShoppingListModel(
+            id=db_list.id,
+            name=db_list.name,
+            family_id=db_list.family_id,
+            items=items,
+            is_active=db_list.is_active,
+            created_at=db_list.created_at,
+            created_by=db_list.created_by
+        )
+        if db_list.updated_at:
+            shopping_list.updated_at = db_list.updated_at
+            
+        return shopping_list
     
     async def create_list(
         self, 
         name: str, 
         family_id: str, 
         created_by: Optional[str] = None
-    ) -> ShoppingList:
-        """
-        Создает новый список покупок.
+    ) -> ShoppingListModel:
+        """Create a new shopping list."""
+        list_id = str(uuid4())
         
-        Args:
-            name: Название списка
-            family_id: ID семьи
-            created_by: ID пользователя, создавшего список
-            
-        Returns:
-            Созданный список покупок
-        """
-        list_id = generate_uuid()
-        
-        shopping_list = ShoppingList(
+        db_list = ShoppingList(
             id=list_id,
             name=name,
             family_id=family_id,
-            created_at=datetime.now(),
             created_by=created_by,
-            items=[]
+            is_active=True
         )
         
-        # Сохраняем в "базу данных"
-        self._db[list_id] = shopping_list
+        self._db.add(db_list)
+        self._db.commit()
+        self._db.refresh(db_list)
         
-        logger.info(f"Создан новый список покупок: {name} для семьи {family_id}")
-        return shopping_list
+        return self._to_model(db_list)
     
-    async def get_list(self, list_id: str) -> Optional[ShoppingList]:
-        """
-        Получает список покупок по ID.
+    async def get_list(self, list_id: str) -> Optional[ShoppingListModel]:
+        """Get a shopping list by ID."""
+        db_list = self._db.query(ShoppingList).filter(ShoppingList.id == list_id).first()
         
-        Args:
-            list_id: ID списка покупок
+        if not db_list:
+            return None
             
-        Returns:
-            Список покупок или None, если список не найден
-        """
-        return self._db.get(list_id)
+        return self._to_model(db_list)
     
-    async def get_active_list_for_family(self, family_id: str) -> Optional[ShoppingList]:
-        """
-        Получает активный список покупок для семьи.
+    async def get_active_list_for_family(self, family_id: str) -> Optional[ShoppingListModel]:
+        """Get the active shopping list for a family."""
+        db_list = self._db.query(ShoppingList).filter(
+            and_(
+                ShoppingList.family_id == family_id,
+                ShoppingList.is_active == True
+            )
+        ).first()
         
-        Args:
-            family_id: ID семьи
+        if not db_list:
+            return None
             
-        Returns:
-            Активный список покупок или None, если активный список не найден
-        """
-        for shopping_list in self._db.values():
-            if shopping_list.family_id == family_id and shopping_list.is_active:
-                return shopping_list
-        
-        return None
-    
+        return self._to_model(db_list)
+
+
     async def get_lists_for_family(self, family_id: str) -> List[ShoppingList]:
         """
         Получает все списки покупок для семьи.
