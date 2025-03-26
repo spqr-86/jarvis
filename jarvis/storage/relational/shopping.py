@@ -1,7 +1,3 @@
-"""
-Репозиторий для работы со списками покупок в реляционной базе данных.
-"""
-
 import logging
 from datetime import datetime
 from uuid import uuid4
@@ -65,6 +61,23 @@ class ShoppingListRepository:
             shopping_list.updated_at = db_list.updated_at
             
         return shopping_list
+
+    def _to_db_entity(self, item_model: ShoppingItemModel, list_id: str) -> ShoppingItem:
+        """Convert domain model to database entity."""
+        return ShoppingItem(
+            id=item_model.id,
+            name=item_model.name,
+            quantity=item_model.quantity,
+            unit=item_model.unit,
+            category=ItemCategoryEnum(item_model.category.value),
+            priority=ItemPriorityEnum(item_model.priority.value),
+            is_purchased=item_model.is_purchased,
+            notes=item_model.notes,
+            shopping_list_id=list_id,
+            assigned_to=item_model.assigned_to,
+            created_at=item_model.created_at,
+            updated_at=item_model.updated_at
+        )
     
     async def create_list(
         self, 
@@ -112,8 +125,7 @@ class ShoppingListRepository:
             
         return self._to_model(db_list)
 
-
-    async def get_lists_for_family(self, family_id: str) -> List[ShoppingList]:
+    async def get_lists_for_family(self, family_id: str) -> List[ShoppingListModel]:
         """
         Получает все списки покупок для семьи.
         
@@ -123,10 +135,11 @@ class ShoppingListRepository:
         Returns:
             Список списков покупок
         """
-        return [
-            shopping_list for shopping_list in self._db.values()
-            if shopping_list.family_id == family_id
-        ]
+        db_lists = self._db.query(ShoppingList).filter(
+            ShoppingList.family_id == family_id
+        ).all()
+        
+        return [self._to_model(db_list) for db_list in db_lists]
     
     async def add_item(
             self, 
@@ -137,7 +150,7 @@ class ShoppingListRepository:
             category: ItemCategory = ItemCategory.OTHER,
             priority: Optional[ItemPriority] = None,
             notes: Optional[str] = None
-        ) -> Tuple[bool, Optional[ShoppingItem]]:
+        ) -> Tuple[bool, Optional[ShoppingItemModel]]:
             """
             Добавляет товар в список покупок.
             
@@ -153,33 +166,50 @@ class ShoppingListRepository:
             Returns:
                 Кортеж (успех операции, созданный товар)
             """
-            shopping_list = await self.get_list(list_id)
-            if not shopping_list:
+            # Get the database list
+            db_list = self._db.query(ShoppingList).filter(ShoppingList.id == list_id).first()
+            if not db_list:
                 logger.warning(f"Не удалось найти список покупок с ID {list_id}")
                 return False, None
             
-            # Устанавливаем значение по умолчанию для приоритета, если оно не указано
+            # Устанавливаем значение по умолчанию для приоритета
             if priority is None:
                 priority = ItemPriority.MEDIUM
             
-            item = ShoppingItem(
-                id=generate_uuid(),
+            # Create a new item in the database
+            item_id = str(uuid4())
+            db_item = ShoppingItem(
+                id=item_id,
                 name=name,
                 quantity=quantity,
                 unit=unit,
-                category=category,
-                priority=priority,
+                category=ItemCategoryEnum(category.value),
+                priority=ItemPriorityEnum(priority.value),
+                is_purchased=False,
                 notes=notes,
-                created_at=datetime.now()
+                shopping_list_id=list_id
             )
             
-            shopping_list.add_item(item)
+            self._db.add(db_item)
+            self._db.commit()
+            self._db.refresh(db_item)
             
-            # Обновляем список в "базе данных"
-            self._db[list_id] = shopping_list
+            # Convert to domain model
+            item_model = ShoppingItemModel(
+                id=db_item.id,
+                name=db_item.name,
+                quantity=db_item.quantity,
+                unit=db_item.unit,
+                category=ItemCategory(db_item.category.value),
+                priority=ItemPriority(db_item.priority.value),
+                assigned_to=db_item.assigned_to,
+                is_purchased=db_item.is_purchased,
+                notes=db_item.notes,
+                created_at=db_item.created_at
+            )
             
             logger.info(f"Добавлен товар '{name}' в список покупок {list_id}")
-            return True, item
+            return True, item_model
     
     async def update_list(self, list_id: str, **kwargs) -> bool:
         """
@@ -192,19 +222,20 @@ class ShoppingListRepository:
         Returns:
             True, если список был обновлен, иначе False
         """
-        shopping_list = await self.get_list(list_id)
-        if not shopping_list:
+        db_list = self._db.query(ShoppingList).filter(ShoppingList.id == list_id).first()
+        if not db_list:
             logger.warning(f"Не удалось найти список покупок с ID {list_id}")
             return False
         
+        # Update attributes
         for key, value in kwargs.items():
-            if hasattr(shopping_list, key) and key not in ['id', 'family_id', 'created_at', 'items']:
-                setattr(shopping_list, key, value)
+            if hasattr(db_list, key) and key not in ['id', 'family_id', 'created_at', 'items']:
+                setattr(db_list, key, value)
         
-        shopping_list.updated_at = datetime.now()
+        db_list.updated_at = datetime.now()
         
-        # Обновляем список в "базе данных"
-        self._db[list_id] = shopping_list
+        self._db.add(db_list)
+        self._db.commit()
         
         logger.info(f"Обновлен список покупок {list_id}")
         return True
@@ -221,21 +252,35 @@ class ShoppingListRepository:
         Returns:
             True, если товар был обновлен, иначе False
         """
-        shopping_list = await self.get_list(list_id)
-        if not shopping_list:
-            logger.warning(f"Не удалось найти список покупок с ID {list_id}")
+        db_item = self._db.query(ShoppingItem).filter(
+            and_(
+                ShoppingItem.shopping_list_id == list_id,
+                ShoppingItem.id == item_id
+            )
+        ).first()
+        
+        if not db_item:
+            logger.warning(f"Не удалось найти товар {item_id} в списке покупок {list_id}")
             return False
         
-        success = shopping_list.update_item(item_id, **kwargs)
+        # Update attributes
+        for key, value in kwargs.items():
+            if hasattr(db_item, key) and key not in ['id', 'shopping_list_id', 'created_at']:
+                # Handle enums
+                if key == 'category' and isinstance(value, ItemCategory):
+                    setattr(db_item, key, ItemCategoryEnum(value.value))
+                elif key == 'priority' and isinstance(value, ItemPriority):
+                    setattr(db_item, key, ItemPriorityEnum(value.value))
+                else:
+                    setattr(db_item, key, value)
         
-        if success:
-            # Обновляем список в "базе данных"
-            self._db[list_id] = shopping_list
-            logger.info(f"Обновлен товар {item_id} в списке покупок {list_id}")
-        else:
-            logger.warning(f"Не удалось найти товар {item_id} в списке покупок {list_id}")
+        db_item.updated_at = datetime.now()
         
-        return success
+        self._db.add(db_item)
+        self._db.commit()
+        
+        logger.info(f"Обновлен товар {item_id} в списке покупок {list_id}")
+        return True
     
     async def remove_item(self, list_id: str, item_id: str) -> bool:
         """
@@ -248,21 +293,22 @@ class ShoppingListRepository:
         Returns:
             True, если товар был удален, иначе False
         """
-        shopping_list = await self.get_list(list_id)
-        if not shopping_list:
-            logger.warning(f"Не удалось найти список покупок с ID {list_id}")
+        db_item = self._db.query(ShoppingItem).filter(
+            and_(
+                ShoppingItem.shopping_list_id == list_id,
+                ShoppingItem.id == item_id
+            )
+        ).first()
+        
+        if not db_item:
+            logger.warning(f"Не удалось найти товар {item_id} в списке покупок {list_id}")
             return False
         
-        success = shopping_list.remove_item(item_id)
+        self._db.delete(db_item)
+        self._db.commit()
         
-        if success:
-            # Обновляем список в "базе данных"
-            self._db[list_id] = shopping_list
-            logger.info(f"Удален товар {item_id} из списка покупок {list_id}")
-        else:
-            logger.warning(f"Не удалось найти товар {item_id} в списке покупок {list_id}")
-        
-        return success
+        logger.info(f"Удален товар {item_id} из списка покупок {list_id}")
+        return True
     
     async def delete_list(self, list_id: str) -> bool:
         """
@@ -274,11 +320,14 @@ class ShoppingListRepository:
         Returns:
             True, если список был удален, иначе False
         """
-        if list_id not in self._db:
+        db_list = self._db.query(ShoppingList).filter(ShoppingList.id == list_id).first()
+        if not db_list:
             logger.warning(f"Не удалось найти список покупок с ID {list_id}")
             return False
         
-        del self._db[list_id]
+        self._db.delete(db_list)
+        self._db.commit()
+        
         logger.info(f"Удален список покупок {list_id}")
         return True
     
@@ -294,21 +343,26 @@ class ShoppingListRepository:
         Returns:
             True, если товар был отмечен, иначе False
         """
-        shopping_list = await self.get_list(list_id)
-        if not shopping_list:
-            logger.warning(f"Не удалось найти список покупок с ID {list_id}")
-            return False
+        db_item = self._db.query(ShoppingItem).filter(
+            and_(
+                ShoppingItem.shopping_list_id == list_id,
+                ShoppingItem.id == item_id
+            )
+        ).first()
         
-        item = shopping_list.get_item(item_id)
-        if not item:
+        if not db_item:
             logger.warning(f"Не удалось найти товар {item_id} в списке покупок {list_id}")
             return False
         
-        item.mark_as_purchased(by_user_id)
-        shopping_list.updated_at = datetime.now()
+        db_item.is_purchased = True
+        db_item.updated_at = datetime.now()
         
-        # Обновляем список в "базе данных"
-        self._db[list_id] = shopping_list
+        # Set assigned_to if provided
+        if by_user_id and not db_item.assigned_to:
+            db_item.assigned_to = by_user_id
+        
+        self._db.add(db_item)
+        self._db.commit()
         
         logger.info(f"Товар {item_id} отмечен как купленный в списке покупок {list_id}")
         return True
@@ -323,16 +377,20 @@ class ShoppingListRepository:
         Returns:
             Количество удаленных товаров
         """
-        shopping_list = await self.get_list(list_id)
-        if not shopping_list:
-            logger.warning(f"Не удалось найти список покупок с ID {list_id}")
-            return 0
+        purchased_items = self._db.query(ShoppingItem).filter(
+            and_(
+                ShoppingItem.shopping_list_id == list_id,
+                ShoppingItem.is_purchased == True
+            )
+        ).all()
         
-        count = shopping_list.clear_purchased_items()
+        count = len(purchased_items)
         
         if count > 0:
-            # Обновляем список в "базе данных"
-            self._db[list_id] = shopping_list
+            for item in purchased_items:
+                self._db.delete(item)
+            
+            self._db.commit()
             logger.info(f"Удалено {count} купленных товаров из списка покупок {list_id}")
         
         return count

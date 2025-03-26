@@ -8,6 +8,7 @@ from telegram.ext import Application
 
 from jarvis.bot.bot_shopping_integration import ShoppingBotIntegration
 from jarvis.bot.bot_budget_integration import BudgetBotIntegration
+from jarvis.bot.bot_family_integration import FamilyBotIntegration
 from jarvis.storage.relational.shopping import ShoppingListRepository
 from jarvis.storage.relational.budget import (
     TransactionRepository, BudgetRepository, FinancialGoalRepository
@@ -40,6 +41,10 @@ def register_modules(application: Application) -> None:
         goal_repository=goal_repository
     )
     budget_integration.register_handlers(application)
+
+    # Инициализация и регистрация модуля семьи
+    family_integration = FamilyBotIntegration()
+    family_integration.register_handlers(application)
     
     logger.info("Модули функциональности зарегистрированы")
     

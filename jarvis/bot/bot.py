@@ -11,6 +11,8 @@ from telegram.ext import (
     filters,
 )
 
+from uuid import uuid4
+
 from jarvis.config import TELEGRAM_BOT_TOKEN
 from jarvis.llm.models import LLMService
 from jarvis.storage.vector.chroma_store import VectorStoreService
@@ -19,6 +21,9 @@ from jarvis.llm.graphs.basic_conversation import ConversationGraph
 from jarvis.bot.bot_integration import register_modules
 from jarvis.bot.bot_shopping_integration import ShoppingBotIntegration
 from jarvis.bot.bot_budget_integration import BudgetBotIntegration
+from jarvis.bot.bot_family_integration import FamilyBotIntegration
+from jarvis.storage.relational.dal.user_dal import UserDAO
+from jarvis.services.family import FamilyService
 
 
 # Настройка логирования
@@ -33,6 +38,7 @@ vector_store = VectorStoreService()
 conversation_graph = ConversationGraph(llm_service)
 shopping_integration = ShoppingBotIntegration()
 budget_integration = BudgetBotIntegration()
+family_integration = FamilyBotIntegration()
 
 # Системное сообщение для LLM
 SYSTEM_MESSAGE = """
@@ -46,28 +52,76 @@ SYSTEM_MESSAGE = """
 USER_SESSIONS: Dict[int, Dict[str, Any]] = {}
 
 
+from jarvis.services.family_registration import FamilyRegistrationService
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start."""
-    user = update.effective_user
-    message = (
-        f"Привет, {user.first_name}! Я Jarvis — ваш семейный ассистент. "
-        f"Я могу помочь с планированием задач, напоминаниями и другими повседневными делами.\n\n"
-        f"Вот несколько вещей, которые я могу сделать:\n"
-        f"• Создать напоминание\n"
-        f"• Спланировать мероприятие\n"
-        f"• Составить список покупок\n"
-        f"• Управлять семейным бюджетом\n\n"
-        f"Чем я могу помочь вам сегодня?"
-    )
-    await update.message.reply_text(message)
+    # Получаем информацию о пользователе из Telegram
+    tg_user = update.effective_user
     
-    # Инициализация сессии пользователя
-    user_id = update.effective_user.id
+    # Получаем или создаем пользователя в базе данных
+    user_dao = UserDAO()
+    db_user = user_dao.get_by_telegram_id(str(tg_user.id))
+    
+    if not db_user:
+        # Создаем нового пользователя, если его нет
+        db_user = user_dao.create(obj_in={
+            "id": str(uuid4()),
+            "telegram_id": str(tg_user.id),
+            "username": tg_user.username,
+            "first_name": tg_user.first_name,
+            "last_name": tg_user.last_name
+        })
+    
+    # Создаем или получаем семью для пользователя
+    try:
+        family, is_new_family = FamilyRegistrationService.create_or_get_family(
+            user_id=db_user.id, 
+            family_name=f"Семья {tg_user.first_name}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при создании семьи: {e}")
+        await update.message.reply_text(
+            "Произошла ошибка при регистрации. Пожалуйста, попробуйте позже."
+        )
+        return
+    
+    # Формируем приветственное сообщение
+    if is_new_family:
+        message = (
+            f"Привет, {tg_user.first_name}! Я Jarvis — ваш семейный ассистент. 🤖\n\n"
+            f"Я только что создал для вас семью '{family.name}'. "
+            f"Теперь вы можете:\n"
+            f"• Добавлять членов семьи\n"
+            f"• Создавать общие списки покупок\n"
+            f"• Вести семейный бюджет\n"
+            f"• Планировать события\n\n"
+            f"Чем я могу помочь вам сегодня?"
+        )
+    else:
+        message = (
+            f"Привет, {tg_user.first_name}! Я Jarvis — ваш семейный ассистент. 🤖\n\n"
+            f"Рад, что вы снова здесь! Ваша семья '{family.name}' уже готова к работе.\n\n"
+            f"Вот что я могу сделать:\n"
+            f"• Создать напоминание\n"
+            f"• Спланировать мероприятие\n"
+            f"• Составить список покупок\n"
+            f"• Управлять семейным бюджетом\n\n"
+            f"Чем я могу помочь вам сегодня?"
+        )
+    
+    # Обновляем сессию пользователя с реальным ID семьи
+    user_id = tg_user.id
     if user_id not in USER_SESSIONS:
         USER_SESSIONS[user_id] = {
             "chat_history": [],
-            "family_id": None  # В будущем будет связано с базой данных
+            "family_id": family.id
         }
+    else:
+        USER_SESSIONS[user_id]["family_id"] = family.id
+    
+    # Отправляем приветственное сообщение
+    await update.message.reply_text(message)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

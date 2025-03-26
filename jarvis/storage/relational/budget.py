@@ -6,13 +6,23 @@ import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional, Dict, Any, Union, Tuple
+from uuid import uuid4
 
-from jarvis.core.models.budget import (
-    Transaction, Budget, FinancialGoal, 
-    BudgetCategory, TransactionType, GoalPriority,
-    RecurringFrequency
+from sqlalchemy.orm import Session
+from sqlalchemy import and_, desc
+
+from jarvis.storage.database import get_db_session
+from jarvis.storage.relational.models.budget import (
+    Transaction as TransactionEntity, 
+    Budget as BudgetEntity,
+    CategoryBudget as CategoryBudgetEntity,
+    BudgetCategoryEnum, 
+    TransactionTypeEnum
 )
-from jarvis.utils.helpers import generate_uuid
+from jarvis.core.models.budget import (
+    Transaction, Budget, CategoryBudget,
+    BudgetCategory, TransactionType, RecurringFrequency, GoalPriority
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +30,55 @@ logger = logging.getLogger(__name__)
 class TransactionRepository:
     """Репозиторий для работы с финансовыми транзакциями."""
 
-    def __init__(self, db_connection=None):
+    def __init__(self, db_session=None):
         """
         Инициализация репозитория транзакций.
         
         Args:
-            db_connection: Подключение к базе данных (в будущем реализации)
+            db_session: Подключение к базе данных
         """
-        # В MVP будем использовать in-memory хранилище
-        # В будущем здесь будет интеграция с реальной БД
-        self._db = {}  # Dict[transaction_id, Transaction]
-        self._db_connection = db_connection
+        self._db = db_session or next(get_db_session())
+    
+    def _to_model(self, db_transaction: TransactionEntity) -> Transaction:
+        """Convert database entity to domain model."""
+        transaction = Transaction(
+            id=db_transaction.id,
+            amount=db_transaction.amount,
+            currency=db_transaction.currency,
+            category=BudgetCategory(db_transaction.category.value),
+            transaction_type=TransactionType(db_transaction.transaction_type.value),
+            description=db_transaction.description,
+            date=db_transaction.date,
+            family_id=db_transaction.family_id,
+            created_by=db_transaction.user_id,
+            tags=[],  # Tags would be handled separately in a real implementation
+            is_recurring=db_transaction.is_recurring,
+            recurring_frequency=RecurringFrequency(db_transaction.recurring_frequency) if db_transaction.recurring_frequency else None,
+            created_at=db_transaction.created_at
+        )
+        if db_transaction.updated_at:
+            transaction.updated_at = db_transaction.updated_at
+        
+        return transaction
+    
+    def _to_db_entity(self, transaction: Transaction, budget_id: Optional[str] = None) -> TransactionEntity:
+        """Convert domain model to database entity."""
+        return TransactionEntity(
+            id=transaction.id,
+            amount=transaction.amount,
+            currency=transaction.currency,
+            category=BudgetCategoryEnum(transaction.category.value),
+            transaction_type=TransactionTypeEnum(transaction.transaction_type.value),
+            description=transaction.description,
+            date=transaction.date,
+            family_id=transaction.family_id,
+            user_id=transaction.created_by,
+            budget_id=budget_id,
+            is_recurring=transaction.is_recurring,
+            recurring_frequency=transaction.recurring_frequency.value if transaction.recurring_frequency else None,
+            created_at=transaction.created_at,
+            updated_at=transaction.updated_at
+        )
     
     async def create_transaction(
         self,
@@ -44,7 +92,8 @@ class TransactionRepository:
         currency: str = "RUB",
         tags: Optional[List[str]] = None,
         is_recurring: bool = False,
-        recurring_frequency: Optional[RecurringFrequency] = None
+        recurring_frequency: Optional[RecurringFrequency] = None,
+        budget_id: Optional[str] = None
     ) -> Transaction:
         """
         Создает новую финансовую транзакцию.
@@ -61,37 +110,39 @@ class TransactionRepository:
             tags: Список тегов для группировки транзакций
             is_recurring: Является ли транзакция повторяющейся
             recurring_frequency: Частота повторения (если повторяющаяся)
+            budget_id: ID бюджета (если транзакция привязана к бюджету)
             
         Returns:
             Созданная транзакция
         """
-        transaction_id = generate_uuid()
+        transaction_id = str(uuid4())
         
         # Если дата не указана, используем текущее время
         if date is None:
             date = datetime.now()
         
-        # Создаем транзакцию
-        transaction = Transaction(
+        # Создаем запись в базе данных
+        db_transaction = TransactionEntity(
             id=transaction_id,
             amount=amount,
             currency=currency,
-            category=category,
-            transaction_type=transaction_type,
+            category=BudgetCategoryEnum(category.value),
+            transaction_type=TransactionTypeEnum(transaction_type.value),
             description=description,
             date=date,
             family_id=family_id,
-            created_by=created_by,
-            tags=tags or [],
+            user_id=created_by,
+            budget_id=budget_id,
             is_recurring=is_recurring,
-            recurring_frequency=recurring_frequency
+            recurring_frequency=recurring_frequency.value if recurring_frequency else None
         )
         
-        # Сохраняем в "базу данных"
-        self._db[transaction_id] = transaction
+        self._db.add(db_transaction)
+        self._db.commit()
+        self._db.refresh(db_transaction)
         
         logger.info(f"Создана новая транзакция: {transaction_id} ({transaction_type.value}) для семьи {family_id}")
-        return transaction
+        return self._to_model(db_transaction)
     
     async def create_expense(
         self,
@@ -167,7 +218,14 @@ class TransactionRepository:
         Returns:
             Транзакция или None, если транзакция не найдена
         """
-        return self._db.get(transaction_id)
+        db_transaction = self._db.query(TransactionEntity).filter(
+            TransactionEntity.id == transaction_id
+        ).first()
+        
+        if not db_transaction:
+            return None
+            
+        return self._to_model(db_transaction)
     
     async def get_transactions_for_family(
         self,
@@ -192,32 +250,32 @@ class TransactionRepository:
         Returns:
             Список транзакций, соответствующих условиям фильтрации
         """
-        transactions = [
-            transaction for transaction in self._db.values()
-            if transaction.family_id == family_id
-        ]
+        query = self._db.query(TransactionEntity).filter(
+            TransactionEntity.family_id == family_id
+        )
         
         # Применяем фильтры
         if start_date:
-            transactions = [t for t in transactions if t.date >= start_date]
+            query = query.filter(TransactionEntity.date >= start_date)
         
         if end_date:
-            transactions = [t for t in transactions if t.date <= end_date]
+            query = query.filter(TransactionEntity.date <= end_date)
         
         if transaction_type:
-            transactions = [t for t in transactions if t.transaction_type == transaction_type]
+            query = query.filter(TransactionEntity.transaction_type == TransactionTypeEnum(transaction_type.value))
         
         if category:
-            transactions = [t for t in transactions if t.category == category]
+            query = query.filter(TransactionEntity.category == BudgetCategoryEnum(category.value))
         
         # Сортируем по дате (от новых к старым)
-        transactions.sort(key=lambda t: t.date, reverse=True)
+        query = query.order_by(desc(TransactionEntity.date))
         
         # Применяем ограничение по количеству, если указано
         if limit is not None:
-            transactions = transactions[:limit]
+            query = query.limit(limit)
         
-        return transactions
+        db_transactions = query.all()
+        return [self._to_model(t) for t in db_transactions]
     
     async def get_recurring_transactions(self, family_id: str) -> List[Transaction]:
         """
@@ -229,10 +287,14 @@ class TransactionRepository:
         Returns:
             Список повторяющихся транзакций
         """
-        return [
-            transaction for transaction in self._db.values()
-            if transaction.family_id == family_id and transaction.is_recurring
-        ]
+        db_transactions = self._db.query(TransactionEntity).filter(
+            and_(
+                TransactionEntity.family_id == family_id,
+                TransactionEntity.is_recurring == True
+            )
+        ).all()
+        
+        return [self._to_model(t) for t in db_transactions]
     
     async def update_transaction(
         self,
@@ -249,24 +311,37 @@ class TransactionRepository:
         Returns:
             Обновленная транзакция или None, если транзакция не найдена
         """
-        transaction = self._db.get(transaction_id)
-        if not transaction:
+        db_transaction = self._db.query(TransactionEntity).filter(
+            TransactionEntity.id == transaction_id
+        ).first()
+        
+        if not db_transaction:
             logger.warning(f"Не удалось найти транзакцию с ID {transaction_id}")
             return None
         
         # Обновляем атрибуты
         for key, value in kwargs.items():
-            if hasattr(transaction, key) and key not in ['id', 'family_id', 'created_at']:
-                setattr(transaction, key, value)
+            if hasattr(db_transaction, key) and key not in ['id', 'family_id', 'created_at']:
+                # Handle enum conversions
+                if key == 'category' and isinstance(value, BudgetCategory):
+                    setattr(db_transaction, key, BudgetCategoryEnum(value.value))
+                elif key == 'transaction_type' and isinstance(value, TransactionType):
+                    setattr(db_transaction, key, TransactionTypeEnum(value.value))
+                elif key == 'recurring_frequency' and isinstance(value, RecurringFrequency):
+                    setattr(db_transaction, key, value.value)
+                else:
+                    setattr(db_transaction, key, value)
         
         # Обновляем время изменения
-        transaction.updated_at = datetime.now()
+        db_transaction.updated_at = datetime.now()
         
-        # Обновляем в "базе данных"
-        self._db[transaction_id] = transaction
+        # Сохраняем изменения
+        self._db.add(db_transaction)
+        self._db.commit()
+        self._db.refresh(db_transaction)
         
         logger.info(f"Обновлена транзакция {transaction_id}")
-        return transaction
+        return self._to_model(db_transaction)
     
     async def delete_transaction(self, transaction_id: str) -> bool:
         """
@@ -278,11 +353,17 @@ class TransactionRepository:
         Returns:
             True, если транзакция была удалена, иначе False
         """
-        if transaction_id not in self._db:
+        db_transaction = self._db.query(TransactionEntity).filter(
+            TransactionEntity.id == transaction_id
+        ).first()
+        
+        if not db_transaction:
             logger.warning(f"Не удалось найти транзакцию с ID {transaction_id}")
             return False
         
-        del self._db[transaction_id]
+        self._db.delete(db_transaction)
+        self._db.commit()
+        
         logger.info(f"Удалена транзакция {transaction_id}")
         return True
     
@@ -373,7 +454,7 @@ class TransactionRepository:
                 "category_name": BudgetCategory.get_ru_name(category),
                 "icon": BudgetCategory.get_icon(category),
                 "amount": amount,
-                "percentage": round(percentage, 2)
+                "percentage": round(float(percentage), 2)
             })
         
         # Сортируем по сумме (от большей к меньшей)
@@ -393,17 +474,48 @@ class TransactionRepository:
 class BudgetRepository:
     """Репозиторий для работы с бюджетами."""
     
-    def __init__(self, db_connection=None):
+    def __init__(self, db_session=None):
         """
         Инициализация репозитория бюджетов.
         
         Args:
-            db_connection: Подключение к базе данных (в будущем реализации)
+            db_session: Подключение к базе данных
         """
-        # В MVP будем использовать in-memory хранилище
-        # В будущем здесь будет интеграция с реальной БД
-        self._db = {}  # Dict[budget_id, Budget]
-        self._db_connection = db_connection
+        self._db = db_session or next(get_db_session())
+    
+    def _to_model(self, db_budget: BudgetEntity) -> Budget:
+        """Convert database budget entity to domain model."""
+        # Create category budgets dictionary
+        category_budgets = {}
+        for db_category_budget in db_budget.category_budgets:
+            category = BudgetCategory(db_category_budget.category.value)
+            category_budget = CategoryBudget(
+                category=category,
+                limit=db_category_budget.limit,
+                currency=db_category_budget.currency,
+                spent=db_category_budget.spent
+            )
+            category_budgets[category] = category_budget
+        
+        # Create budget model
+        budget = Budget(
+            id=db_budget.id,
+            name=db_budget.name,
+            family_id=db_budget.family_id,
+            period_start=db_budget.period_start,
+            period_end=db_budget.period_end,
+            currency=db_budget.currency,
+            income_plan=db_budget.income_plan,
+            income_actual=db_budget.income_actual,
+            category_budgets=category_budgets,
+            created_by=db_budget.created_by,
+            created_at=db_budget.created_at
+        )
+        
+        if db_budget.updated_at:
+            budget.updated_at = db_budget.updated_at
+        
+        return budget
     
     async def create_budget(
         self,
@@ -432,10 +544,10 @@ class BudgetRepository:
         Returns:
             Созданный бюджет
         """
-        budget_id = generate_uuid()
+        budget_id = str(uuid4())
         
-        # Создаем бюджет
-        budget = Budget(
+        # Создаем бюджет в базе данных
+        db_budget = BudgetEntity(
             id=budget_id,
             name=name,
             family_id=family_id,
@@ -447,131 +559,29 @@ class BudgetRepository:
             created_by=created_by
         )
         
+        self._db.add(db_budget)
+        self._db.commit()
+        self._db.refresh(db_budget)
+        
         # Добавляем лимиты по категориям, если указаны
         if category_limits:
             for category, limit in category_limits.items():
-                budget.add_category_budget(category, limit)
-        
-        # Сохраняем в "базу данных"
-        self._db[budget_id] = budget
+                db_category_budget = CategoryBudgetEntity(
+                    id=str(uuid4()),
+                    budget_id=budget_id,
+                    category=BudgetCategoryEnum(category.value),
+                    limit=limit,
+                    spent=Decimal('0'),
+                    currency=currency
+                )
+                self._db.add(db_category_budget)
+            
+            self._db.commit()
+            # Refresh to get the category budgets
+            db_budget = self._db.query(BudgetEntity).filter(BudgetEntity.id == budget_id).first()
         
         logger.info(f"Создан новый бюджет: {name} для семьи {family_id}")
-        return budget
-    
-    async def create_monthly_budget(
-        self,
-        year: int,
-        month: int,
-        family_id: str,
-        created_by: str,
-        income_plan: Decimal = Decimal('0'),
-        name: Optional[str] = None,
-        currency: str = "RUB",
-        category_limits: Optional[Dict[BudgetCategory, Decimal]] = None
-    ) -> Budget:
-        """
-        Создает бюджет на указанный месяц.
-        
-        Args:
-            year: Год
-            month: Месяц (1-12)
-            family_id: ID семьи
-            created_by: ID пользователя, создавшего бюджет
-            income_plan: Планируемый доход
-            name: Название бюджета (если None, генерируется автоматически)
-            currency: Валюта бюджета
-            category_limits: Словарь с лимитами по категориям
-            
-        Returns:
-            Бюджет на месяц
-        """
-        # Используем метод создания месячного бюджета из модели
-        budget = Budget.create_monthly_budget(
-            year=year,
-            month=month,
-            family_id=family_id,
-            created_by=created_by,
-            income_plan=income_plan,
-            name=name,
-            currency=currency
-        )
-        
-        # Добавляем лимиты по категориям, если указаны
-        if category_limits:
-            for category, limit in category_limits.items():
-                budget.add_category_budget(category, limit)
-        
-        # Сохраняем в "базу данных"
-        self._db[budget.id] = budget
-        
-        logger.info(f"Создан новый месячный бюджет: {budget.name} для семьи {family_id}")
-        return budget
-    
-    async def get_budget(self, budget_id: str) -> Optional[Budget]:
-        """
-        Получает бюджет по ID.
-        
-        Args:
-            budget_id: ID бюджета
-            
-        Returns:
-            Бюджет или None, если бюджет не найден
-        """
-        return self._db.get(budget_id)
-    
-    async def get_budgets_for_family(
-        self,
-        family_id: str,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
-    ) -> List[Budget]:
-        """
-        Получает список бюджетов для семьи с возможностью фильтрации по периоду.
-        
-        Args:
-            family_id: ID семьи
-            start_date: Начальная дата для фильтрации
-            end_date: Конечная дата для фильтрации
-            
-        Returns:
-            Список бюджетов, соответствующих условиям фильтрации
-        """
-        budgets = [
-            budget for budget in self._db.values()
-            if budget.family_id == family_id
-        ]
-        
-        # Применяем фильтры
-        if start_date:
-            budgets = [b for b in budgets if b.period_end >= start_date]
-        
-        if end_date:
-            budgets = [b for b in budgets if b.period_start <= end_date]
-        
-        # Сортируем по началу периода (от новых к старым)
-        budgets.sort(key=lambda b: b.period_start, reverse=True)
-        
-        return budgets
-    
-    async def get_current_budget(self, family_id: str) -> Optional[Budget]:
-        """
-        Получает текущий активный бюджет для семьи.
-        
-        Args:
-            family_id: ID семьи
-            
-        Returns:
-            Текущий бюджет или None, если активный бюджет не найден
-        """
-        now = datetime.now()
-        
-        # Ищем бюджет, который включает текущую дату
-        for budget in self._db.values():
-            if (budget.family_id == family_id and
-                budget.period_start <= now <= budget.period_end):
-                return budget
-        
-        return None
+        return self._to_model(db_budget)
     
     async def update_budget(
         self,
@@ -588,24 +598,26 @@ class BudgetRepository:
         Returns:
             Обновленный бюджет или None, если бюджет не найден
         """
-        budget = self._db.get(budget_id)
-        if not budget:
+        db_budget = self._db.query(BudgetEntity).filter(BudgetEntity.id == budget_id).first()
+        if not db_budget:
             logger.warning(f"Не удалось найти бюджет с ID {budget_id}")
             return None
         
         # Обновляем атрибуты
         for key, value in kwargs.items():
-            if hasattr(budget, key) and key not in ['id', 'family_id', 'created_at', 'category_budgets']:
-                setattr(budget, key, value)
+            if hasattr(db_budget, key) and key not in ['id', 'family_id', 'created_at', 'category_budgets']:
+                setattr(db_budget, key, value)
         
         # Обновляем время изменения
-        budget.updated_at = datetime.now()
+        db_budget.updated_at = datetime.now()
         
-        # Обновляем в "базе данных"
-        self._db[budget_id] = budget
+        # Сохраняем изменения
+        self._db.add(db_budget)
+        self._db.commit()
+        self._db.refresh(db_budget)
         
         logger.info(f"Обновлен бюджет {budget_id}")
-        return budget
+        return self._to_model(db_budget)
     
     async def update_category_limit(
         self,
@@ -624,19 +636,40 @@ class BudgetRepository:
         Returns:
             True, если лимит обновлен, иначе False
         """
-        budget = self._db.get(budget_id)
-        if not budget:
+        # Проверяем, существует ли бюджет
+        db_budget = self._db.query(BudgetEntity).filter(BudgetEntity.id == budget_id).first()
+        if not db_budget:
             logger.warning(f"Не удалось найти бюджет с ID {budget_id}")
             return False
         
-        success = budget.update_category_limit(category, limit)
+        # Ищем категорию бюджета
+        db_category = BudgetCategoryEnum(category.value)
+        db_category_budget = self._db.query(CategoryBudgetEntity).filter(
+            and_(
+                CategoryBudgetEntity.budget_id == budget_id,
+                CategoryBudgetEntity.category == db_category
+            )
+        ).first()
         
-        if success:
-            # Обновляем в "базе данных"
-            self._db[budget_id] = budget
-            logger.info(f"Обновлен лимит по категории {category.value} в бюджете {budget_id}")
+        if db_category_budget:
+            # Обновляем существующий лимит
+            db_category_budget.limit = limit
+            self._db.add(db_category_budget)
+        else:
+            # Создаем новый лимит
+            db_category_budget = CategoryBudgetEntity(
+                id=str(uuid4()),
+                budget_id=budget_id,
+                category=db_category,
+                limit=limit,
+                spent=Decimal('0'),
+                currency=db_budget.currency
+            )
+            self._db.add(db_category_budget)
         
-        return success
+        self._db.commit()
+        logger.info(f"Обновлен лимит по категории {category.value} в бюджете {budget_id}")
+        return True
     
     async def add_transaction_to_budget(
         self,
@@ -653,19 +686,72 @@ class BudgetRepository:
         Returns:
             True, если транзакция успешно добавлена, иначе False
         """
-        budget = self._db.get(budget_id)
-        if not budget:
+        # Получаем бюджет
+        db_budget = self._db.query(BudgetEntity).filter(BudgetEntity.id == budget_id).first()
+        if not db_budget:
             logger.warning(f"Не удалось найти бюджет с ID {budget_id}")
             return False
         
-        success = budget.process_transaction(transaction)
+        # Проверяем, что транзакция входит в период бюджета
+        if transaction.date < db_budget.period_start or transaction.date > db_budget.period_end:
+            logger.warning(f"Транзакция {transaction.id} не входит в период бюджета {budget_id}")
+            return False
         
-        if success:
-            # Обновляем в "базе данных"
-            self._db[budget_id] = budget
-            logger.info(f"Добавлена транзакция {transaction.id} в бюджет {budget_id}")
+        # Проверяем, что транзакция принадлежит той же семье
+        if transaction.family_id != db_budget.family_id:
+            logger.warning(f"Транзакция {transaction.id} принадлежит другой семье")
+            return False
         
-        return success
+        # Получаем или создаем запись транзакции в базе данных
+        db_transaction = self._db.query(TransactionEntity).filter(TransactionEntity.id == transaction.id).first()
+        
+        if db_transaction:
+            # Обновляем связь с бюджетом
+            db_transaction.budget_id = budget_id
+            self._db.add(db_transaction)
+        else:
+            # Создаем новую транзакцию
+            transaction_repo = TransactionRepository(self._db)
+            db_transaction = transaction_repo._to_db_entity(transaction, budget_id)
+            self._db.add(db_transaction)
+        
+        # Обновляем бюджет в зависимости от типа транзакции
+        if transaction.transaction_type == TransactionType.INCOME:
+            # Увеличиваем фактический доход
+            db_budget.income_actual += transaction.amount
+        elif transaction.transaction_type == TransactionType.EXPENSE:
+            # Увеличиваем расходы по категории
+            db_category = BudgetCategoryEnum(transaction.category.value)
+            db_category_budget = self._db.query(CategoryBudgetEntity).filter(
+                and_(
+                    CategoryBudgetEntity.budget_id == budget_id,
+                    CategoryBudgetEntity.category == db_category
+                )
+            ).first()
+            
+            if not db_category_budget:
+                # Создаем запись для категории, если ее еще нет
+                db_category_budget = CategoryBudgetEntity(
+                    id=str(uuid4()),
+                    budget_id=budget_id,
+                    category=db_category,
+                    limit=Decimal('0'),  # Лимит по умолчанию
+                    spent=transaction.amount,
+                    currency=db_budget.currency
+                )
+                self._db.add(db_category_budget)
+            else:
+                # Увеличиваем расходы по существующей категории
+                db_category_budget.spent += transaction.amount
+                self._db.add(db_category_budget)
+        
+        # Обновляем время изменения бюджета
+        db_budget.updated_at = datetime.now()
+        self._db.add(db_budget)
+        
+        self._db.commit()
+        logger.info(f"Добавлена транзакция {transaction.id} в бюджет {budget_id}")
+        return True
     
     async def delete_budget(self, budget_id: str) -> bool:
         """
@@ -677,11 +763,15 @@ class BudgetRepository:
         Returns:
             True, если бюджет был удален, иначе False
         """
-        if budget_id not in self._db:
+        db_budget = self._db.query(BudgetEntity).filter(BudgetEntity.id == budget_id).first()
+        if not db_budget:
             logger.warning(f"Не удалось найти бюджет с ID {budget_id}")
             return False
         
-        del self._db[budget_id]
+        # Удаляем бюджет
+        self._db.delete(db_budget)
+        self._db.commit()
+        
         logger.info(f"Удален бюджет {budget_id}")
         return True
 
@@ -689,17 +779,42 @@ class BudgetRepository:
 class FinancialGoalRepository:
     """Репозиторий для работы с финансовыми целями."""
     
-    def __init__(self, db_connection=None):
+    def __init__(self, db=None):
         """
         Инициализация репозитория финансовых целей.
         
         Args:
-            db_connection: Подключение к базе данных (в будущем реализации)
+            db: Подключение к базе данных (в будущем реализации)
         """
-        # В MVP будем использовать in-memory хранилище
-        # В будущем здесь будет интеграция с реальной БД
-        self._db = {}  # Dict[goal_id, FinancialGoal]
-        self._db_connection = db_connection
+        from jarvis.storage.relational.models.financial import FinancialGoal as FinancialGoalEntity, GoalPriorityEnum
+        
+        self.FinancialGoalEntity = FinancialGoalEntity
+        self.GoalPriorityEnum = GoalPriorityEnum
+        self._db = db or next(get_db_session())
+    
+    def _to_model(self, db_goal):
+        """Convert database entity to domain model."""
+        from jarvis.core.models.budget import FinancialGoal, GoalPriority
+        
+        goal = FinancialGoal(
+            id=db_goal.id,
+            name=db_goal.name,
+            target_amount=db_goal.target_amount,
+            current_amount=db_goal.current_amount,
+            currency=db_goal.currency,
+            start_date=db_goal.start_date,
+            deadline=db_goal.deadline,
+            family_id=db_goal.family_id,
+            created_by=db_goal.created_by,
+            priority=GoalPriority(db_goal.priority.value),
+            notes=db_goal.notes,
+            created_at=db_goal.created_at
+        )
+        
+        if db_goal.updated_at:
+            goal.updated_at = db_goal.updated_at
+            
+        return goal
     
     async def create_goal(
         self,
@@ -712,7 +827,7 @@ class FinancialGoalRepository:
         currency: str = "RUB",
         priority: GoalPriority = GoalPriority.MEDIUM,
         notes: Optional[str] = None
-    ) -> FinancialGoal:
+    ):
         """
         Создает новую финансовую цель.
         
@@ -730,10 +845,10 @@ class FinancialGoalRepository:
         Returns:
             Созданная финансовая цель
         """
-        goal_id = generate_uuid()
+        goal_id = str(uuid4())
         
-        # Создаем финансовую цель
-        goal = FinancialGoal(
+        # Создаем цель в базе данных
+        db_goal = self.FinancialGoalEntity(
             id=goal_id,
             name=name,
             target_amount=target_amount,
@@ -743,17 +858,18 @@ class FinancialGoalRepository:
             deadline=deadline,
             family_id=family_id,
             created_by=created_by,
-            priority=priority,
+            priority=self.GoalPriorityEnum(priority.value),
             notes=notes
         )
         
-        # Сохраняем в "базу данных"
-        self._db[goal_id] = goal
+        self._db.add(db_goal)
+        self._db.commit()
+        self._db.refresh(db_goal)
         
         logger.info(f"Создана новая финансовая цель: {name} для семьи {family_id}")
-        return goal
+        return self._to_model(db_goal)
     
-    async def get_goal(self, goal_id: str) -> Optional[FinancialGoal]:
+    async def get_goal(self, goal_id: str):
         """
         Получает финансовую цель по ID.
         
@@ -763,13 +879,18 @@ class FinancialGoalRepository:
         Returns:
             Финансовая цель или None, если цель не найдена
         """
-        return self._db.get(goal_id)
+        db_goal = self._db.query(self.FinancialGoalEntity).filter(self.FinancialGoalEntity.id == goal_id).first()
+        
+        if not db_goal:
+            return None
+            
+        return self._to_model(db_goal)
     
     async def get_goals_for_family(
         self,
         family_id: str,
         include_completed: bool = False
-    ) -> List[FinancialGoal]:
+    ):
         """
         Получает список финансовых целей для семьи.
         
@@ -780,10 +901,12 @@ class FinancialGoalRepository:
         Returns:
             Список финансовых целей
         """
-        goals = [
-            goal for goal in self._db.values()
-            if goal.family_id == family_id
-        ]
+        query = self._db.query(self.FinancialGoalEntity).filter(
+            self.FinancialGoalEntity.family_id == family_id
+        )
+        
+        db_goals = query.all()
+        goals = [self._to_model(g) for g in db_goals]
         
         # Фильтруем завершенные цели, если не нужно их включать
         if not include_completed:
@@ -813,7 +936,7 @@ class FinancialGoalRepository:
         self,
         goal_id: str,
         **kwargs
-    ) -> Optional[FinancialGoal]:
+    ):
         """
         Обновляет финансовую цель.
         
@@ -824,30 +947,36 @@ class FinancialGoalRepository:
         Returns:
             Обновленная финансовая цель или None, если цель не найдена
         """
-        goal = self._db.get(goal_id)
-        if not goal:
+        db_goal = self._db.query(self.FinancialGoalEntity).filter(self.FinancialGoalEntity.id == goal_id).first()
+        if not db_goal:
             logger.warning(f"Не удалось найти финансовую цель с ID {goal_id}")
             return None
         
         # Обновляем атрибуты
         for key, value in kwargs.items():
-            if hasattr(goal, key) and key not in ['id', 'family_id', 'created_at']:
-                setattr(goal, key, value)
+            if hasattr(db_goal, key) and key not in ['id', 'family_id', 'created_at']:
+                # Handle enum conversions
+                if key == 'priority' and isinstance(value, GoalPriority):
+                    setattr(db_goal, key, self.GoalPriorityEnum(value.value))
+                else:
+                    setattr(db_goal, key, value)
         
         # Обновляем время изменения
-        goal.updated_at = datetime.now()
+        db_goal.updated_at = datetime.now()
         
-        # Обновляем в "базе данных"
-        self._db[goal_id] = goal
+        # Сохраняем изменения
+        self._db.add(db_goal)
+        self._db.commit()
+        self._db.refresh(db_goal)
         
         logger.info(f"Обновлена финансовая цель {goal_id}")
-        return goal
+        return self._to_model(db_goal)
     
     async def update_goal_progress(
         self,
         goal_id: str,
         amount: Decimal
-    ) -> Optional[FinancialGoal]:
+    ):
         """
         Обновляет прогресс финансовой цели.
         
@@ -858,19 +987,22 @@ class FinancialGoalRepository:
         Returns:
             Обновленная финансовая цель или None, если цель не найдена
         """
-        goal = self._db.get(goal_id)
-        if not goal:
+        db_goal = self._db.query(self.FinancialGoalEntity).filter(self.FinancialGoalEntity.id == goal_id).first()
+        if not db_goal:
             logger.warning(f"Не удалось найти финансовую цель с ID {goal_id}")
             return None
         
         # Обновляем прогресс
-        goal.update_progress(amount)
+        db_goal.current_amount += amount
+        db_goal.updated_at = datetime.now()
         
-        # Обновляем в "базе данных"
-        self._db[goal_id] = goal
+        # Сохраняем изменения
+        self._db.add(db_goal)
+        self._db.commit()
+        self._db.refresh(db_goal)
         
         logger.info(f"Обновлен прогресс финансовой цели {goal_id}")
-        return goal
+        return self._to_model(db_goal)
     
     async def delete_goal(self, goal_id: str) -> bool:
         """
@@ -882,10 +1014,14 @@ class FinancialGoalRepository:
         Returns:
             True, если цель была удалена, иначе False
         """
-        if goal_id not in self._db:
+        db_goal = self._db.query(self.FinancialGoalEntity).filter(self.FinancialGoalEntity.id == goal_id).first()
+        if not db_goal:
             logger.warning(f"Не удалось найти финансовую цель с ID {goal_id}")
             return False
         
-        del self._db[goal_id]
+        # Удаляем цель
+        self._db.delete(db_goal)
+        self._db.commit()
+        
         logger.info(f"Удалена финансовая цель {goal_id}")
         return True

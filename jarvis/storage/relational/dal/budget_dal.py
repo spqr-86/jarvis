@@ -3,7 +3,7 @@ from sqlalchemy import and_
 
 from jarvis.storage.relational.dal.base import BaseDAO
 from jarvis.storage.relational.models.budget import Budget, Transaction, CategoryBudget
-
+from jarvis.storage.relational.models.financial import FinancialGoal
 
 class BudgetDAO(BaseDAO[Budget, dict, dict]):
     """Data Access Object for budgets."""
@@ -66,4 +66,29 @@ class CategoryBudgetDAO(BaseDAO[CategoryBudget, dict, dict]):
         """Get all category budgets for a specific budget."""
         return self._db.query(CategoryBudget).filter(
             CategoryBudget.budget_id == budget_id
+        ).all()
+
+
+class FinancialGoalDAO(BaseDAO[FinancialGoal, dict, dict]):
+    """Data Access Object for financial goals."""
+    
+    def __init__(self, db=None):
+        super().__init__(FinancialGoal, db)
+    
+    def get_by_family(self, family_id: str):
+        """Get all financial goals for a family."""
+        return self._db.query(FinancialGoal).filter(FinancialGoal.family_id == family_id).all()
+    
+    def get_active_by_family(self, family_id: str):
+        """Get all active (not completed) financial goals for a family."""
+        return self._db.query(FinancialGoal).filter(
+            FinancialGoal.family_id == family_id,
+            FinancialGoal.current_amount < FinancialGoal.target_amount
+        ).all()
+    
+    def get_completed_by_family(self, family_id: str):
+        """Get all completed financial goals for a family."""
+        return self._db.query(FinancialGoal).filter(
+            FinancialGoal.family_id == family_id,
+            FinancialGoal.current_amount >= FinancialGoal.target_amount
         ).all()

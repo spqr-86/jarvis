@@ -29,6 +29,10 @@ DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "groq")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/jarvis")
 
+# Настройки для семей
+MAX_FAMILY_MEMBERS = int(os.getenv("MAX_FAMILY_MEMBERS", "10"))  # Максимальное число членов семьи
+INVITE_EXPIRATION_HOURS = int(os.getenv("INVITE_EXPIRATION_HOURS", "24"))  # Время жизни приглашения
+
 # Проверка обязательных переменных
 def validate_config() -> Dict[str, Optional[str]]:
     """Проверяет наличие обязательных переменных конфигурации."""
