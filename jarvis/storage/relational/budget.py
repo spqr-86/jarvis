@@ -482,6 +482,92 @@ class BudgetRepository:
             db_session: Подключение к базе данных
         """
         self._db = db_session or next(get_db_session())
+
+    async def get_current_budget(
+        self, 
+        family_id: str, 
+        at_date: Optional[datetime] = None
+    ) -> Optional[Budget]:
+        """
+        Получает текущий активный бюджет для семьи.
+        
+        Args:
+            family_id: ID семьи
+            at_date: Дата, на которую ищется бюджет (по умолчанию текущая)
+            
+        Returns:
+            Текущий бюджет или None, если не найден
+        """
+        if at_date is None:
+            at_date = datetime.now()
+        
+        # Находим бюджет, который действует на указанную дату
+        db_budget = self._db.query(BudgetEntity).filter(
+            and_(
+                BudgetEntity.family_id == family_id,
+                BudgetEntity.period_start <= at_date,
+                BudgetEntity.period_end >= at_date
+            )
+        ).first()
+        
+        if not db_budget:
+            logger.info(f"Не найден активный бюджет для семьи {family_id}")
+            return None
+        
+        return self._to_model(db_budget)
+    
+    async def get_budget(self, budget_id: str) -> Optional[Budget]:
+        """
+        Получает бюджет по его ID.
+        
+        Args:
+            budget_id: ID бюджета
+            
+        Returns:
+            Бюджет или None, если не найден
+        """
+        db_budget = self._db.query(BudgetEntity).filter(BudgetEntity.id == budget_id).first()
+        
+        if not db_budget:
+            logger.warning(f"Не найден бюджет с ID {budget_id}")
+            return None
+        
+        return self._to_model(db_budget)
+    
+    async def get_budgets_for_family(
+        self, 
+        family_id: str, 
+        include_past: bool = False
+    ) -> List[Budget]:
+        """
+        Получает список бюджетов для семьи.
+        
+        Args:
+            family_id: ID семьи
+            include_past: Включать ли прошедшие бюджеты
+            
+        Returns:
+            Список бюджетов
+        """
+        now = datetime.now()
+        
+        # Базовый запрос для получения бюджетов семьи
+        query = self._db.query(BudgetEntity).filter(
+            BudgetEntity.family_id == family_id
+        )
+        
+        # Если не включаем прошедшие, фильтруем по текущей дате
+        if not include_past:
+            query = query.filter(
+                BudgetEntity.period_end >= now
+            )
+        
+        # Сортируем по дате начала периода (от новых к старым)
+        query = query.order_by(BudgetEntity.period_start.desc())
+        
+        db_budgets = query.all()
+        
+        return [self._to_model(budget) for budget in db_budgets]
     
     def _to_model(self, db_budget: BudgetEntity) -> Budget:
         """Convert database budget entity to domain model."""
@@ -516,6 +602,92 @@ class BudgetRepository:
             budget.updated_at = db_budget.updated_at
         
         return budget
+    
+    async def create_monthly_budget(
+        self,
+        year: int,
+        month: int,
+        family_id: str,
+        created_by: str,
+        income_plan: Decimal = Decimal('0'),
+        name: Optional[str] = None,
+        currency: str = "RUB",
+        category_limits: Optional[Dict[BudgetCategory, Decimal]] = None
+    ) -> Budget:
+        """
+        Создает бюджет на указанный месяц.
+        
+        Args:
+            year: Год
+            month: Месяц (1-12)
+            family_id: ID семьи
+            created_by: ID пользователя, создавшего бюджет
+            income_plan: Планируемый доход
+            name: Название бюджета (если None, генерируется автоматически)
+            currency: Валюта бюджета
+            category_limits: Словарь с лимитами по категориям
+            
+        Returns:
+            Созданный бюджет
+        """
+        from calendar import monthrange
+        
+        # Проверяем корректность месяца
+        if month < 1 or month > 12:
+            raise ValueError("Месяц должен быть от 1 до 12")
+        
+        # Начало и конец месяца
+        days_in_month = monthrange(year, month)[1]
+        period_start = datetime(year, month, 1, 0, 0, 0)
+        period_end = datetime(year, month, days_in_month, 23, 59, 59)
+        
+        # Название бюджета
+        month_names = {
+            1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+            5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+            9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+        }
+        if name is None:
+            name = f"Бюджет на {month_names[month]} {year}"
+        
+        # Создаем бюджет в базе данных
+        budget_id = str(uuid4())
+        
+        db_budget = BudgetEntity(
+            id=budget_id,
+            name=name,
+            family_id=family_id,
+            period_start=period_start,
+            period_end=period_end,
+            currency=currency,
+            income_plan=income_plan,
+            income_actual=Decimal('0'),
+            created_by=created_by
+        )
+        
+        self._db.add(db_budget)
+        self._db.commit()
+        self._db.refresh(db_budget)
+        
+        # Добавляем лимиты по категориям, если указаны
+        if category_limits:
+            for category, limit in category_limits.items():
+                db_category_budget = CategoryBudgetEntity(
+                    id=str(uuid4()),
+                    budget_id=budget_id,
+                    category=BudgetCategoryEnum(category.value),
+                    limit=limit,
+                    spent=Decimal('0'),
+                    currency=currency
+                )
+                self._db.add(db_category_budget)
+            
+            self._db.commit()
+            # Refresh to get the category budgets
+            db_budget = self._db.query(BudgetEntity).filter(BudgetEntity.id == budget_id).first()
+        
+        logger.info(f"Создан новый бюджет: {name} для семьи {family_id}")
+        return self._to_model(db_budget)
     
     async def create_budget(
         self,

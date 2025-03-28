@@ -27,7 +27,7 @@ class TransactionData(BaseModel):
     amount: float = Field(description="Сумма транзакции")
     transaction_type: TransactionType = Field(description="Тип транзакции (доход/расход)")
     category: Optional[BudgetCategory] = Field(None, description="Категория транзакции")
-    description: str = Field(description="Описание транзакции")
+    description: Optional[str] = Field(description="Описание транзакции")
     date: Optional[str] = Field(None, description="Дата транзакции (если указана)")
     is_recurring: bool = Field(False, description="Является ли транзакция повторяющейся")
     recurring_frequency: Optional[RecurringFrequency] = Field(None, description="Частота повторения (если повторяющаяся)")

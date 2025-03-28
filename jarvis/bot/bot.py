@@ -1,12 +1,11 @@
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -17,13 +16,12 @@ from jarvis.config import TELEGRAM_BOT_TOKEN
 from jarvis.llm.models import LLMService
 from jarvis.storage.vector.chroma_store import VectorStoreService
 from jarvis.utils.helpers import generate_uuid
-from jarvis.llm.graphs.basic_conversation import ConversationGraph
+from jarvis.llm.graphs.router import ConversationRouter
 from jarvis.bot.bot_integration import register_modules
 from jarvis.bot.bot_shopping_integration import ShoppingBotIntegration
 from jarvis.bot.bot_budget_integration import BudgetBotIntegration
 from jarvis.bot.bot_family_integration import FamilyBotIntegration
 from jarvis.storage.relational.dal.user_dal import UserDAO
-from jarvis.services.family import FamilyService
 
 
 # Настройка логирования
@@ -35,10 +33,11 @@ logger = logging.getLogger(__name__)
 # Инициализация сервисов
 llm_service = LLMService()
 vector_store = VectorStoreService()
-conversation_graph = ConversationGraph(llm_service)
+user_dao = UserDAO()
 shopping_integration = ShoppingBotIntegration()
 budget_integration = BudgetBotIntegration()
 family_integration = FamilyBotIntegration()
+conversation_router = ConversationRouter(llm_service)
 
 # Системное сообщение для LLM
 SYSTEM_MESSAGE = """
@@ -153,50 +152,73 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = update.effective_user.id
     message_text = update.message.text
     
-    # Проверяем, есть ли у пользователя активная сессия
+    # Инициализация или получение сессии пользователя
     if user_id not in USER_SESSIONS:
-        USER_SESSIONS[user_id] = {
-            "chat_history": [],
-            "family_id": None  # В будущем будет связано с базой данных
-        }
+        # Получаем пользователя из базы данных
+        db_user = user_dao.get_by_telegram_id(str(user_id))
+        
+        if db_user:
+            # Если пользователь существует, инициализируем сессию
+            USER_SESSIONS[user_id] = {
+                "chat_history": [],
+                "family_id": db_user.family_id,
+                "db_user_id": db_user.id
+            }
+        else:
+            # Если пользователя нет в базе, предложить зарегистрироваться
+            await update.message.reply_text(
+                "Похоже, вы еще не зарегистрированы. Используйте /start для регистрации."
+            )
+            return
     
-    # Получение истории диалога
-    chat_history = USER_SESSIONS[user_id]["chat_history"]
+    # Получение данных сессии
+    session = USER_SESSIONS[user_id]
+    chat_history = session["chat_history"]
+    family_id = session["family_id"]
+    db_user_id = session["db_user_id"]
+
+    # Если family_id отсутствует, предложить создать семью
+    if not family_id:
+        await update.message.reply_text(
+            "У вас нет активной семьи. Используйте /create_family для создания новой семьи."
+        )
+        return
     
     # Показываем пользователю, что бот печатает
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
     )
     
-    # Сначала проверяем, связано ли сообщение со списком покупок
-    shopping_processed = await shopping_integration.process_shopping_message(update, context)
-    
-    # Если сообщение обработано модулем списка покупок, завершаем обработку
-    if shopping_processed:
-        return
-    
-    # Если не связано со списком покупок, обрабатываем через основной граф разговора
-    result = await conversation_graph.process_message(
+    # Используем маршрутизатор для определения, какой граф должен обработать запрос
+    result = await conversation_router.route_message(
         user_input=message_text,
-        chat_history=[{"role": msg["role"], "content": msg["content"]} for msg in chat_history[-5:]]  # Берем последние 5 сообщений
+        user_id=db_user_id,
+        family_id=family_id,
+        chat_history=[{"role": msg["role"], "content": msg["content"]} for msg in chat_history[-5:]]
     )
     
-    response = result["response"]
+    # Проверяем результат маршрутизации
+    if not result or "response" not in result:
+        # Если ни один специализированный граф не смог обработать запрос,
+        # используем запасной ответ
+        response = "Извините, я не смог обработать ваш запрос. Попробуйте переформулировать."
+    else:
+        response = result["response"]
     
     # Обновление истории диалога
     chat_history.append({"role": "user", "content": message_text})
     chat_history.append({"role": "assistant", "content": response})
     
-    # Временная реализация family_id (в реальном приложении это будет из базы данных)
-    family_id = USER_SESSIONS[user_id].get("family_id") or f"family_{user_id}"
-    
     # Сохранение взаимодействия в векторной БД с проверкой метаданных
     interaction_id = generate_uuid()
     
-    # Обеспечиваем, что все поля метаданных имеют валидные значения
+    # Извлекаем метаданные из результата
+    domain = result.get("domain", "general")
     intent = result.get("intent", "unknown")
-    task_id = result.get("task_id", "")  # Пустая строка вместо None
+    confidence = result.get("confidence", 0.0)
+    entities = result.get("entities", {})
     
+    # Сохраняем информацию во временное хранилище для аналитики
     await vector_store.add_texts(
         texts=[message_text, response], 
         metadatas=[
@@ -205,21 +227,25 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "user_id": str(user_id),
                 "type": "user_message",
                 "interaction_id": interaction_id,
+                "domain": domain,
                 "intent": intent,
-                "has_task": bool(task_id != "")  # Преобразуем в булево значение
+                "confidence": confidence,
+                "has_entities": len(entities) > 0
             },
             {
                 "family_id": family_id,
                 "user_id": str(user_id),
                 "type": "assistant_response",
-                "interaction_id": interaction_id
+                "interaction_id": interaction_id,
+                "domain": domain,
+                "intent": intent
             }
         ]
     )
     
     # Отправляем ответ пользователю
     await update.message.reply_text(response)
-
+    
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик ошибок."""
