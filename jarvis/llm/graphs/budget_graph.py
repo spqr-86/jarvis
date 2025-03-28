@@ -411,8 +411,8 @@ class BudgetGraph:
                 else:
                     # Создаем транзакцию
                     transaction = await self.transaction_repository.create_income(
-                        amount=Decimal(str(transaction_data.get("amount", 0.0))),
-                        description=transaction_data.get("description", "Доход"),
+                        amount=Decimal(str(transaction_data.get("amount"))) or 0,
+                        description = transaction_data.get("description") or "Доход",
                         family_id=family_id,
                         created_by=user_id,
                         date=datetime.now() if not transaction_data.get("date") else datetime.fromisoformat(transaction_data.get("date")),
