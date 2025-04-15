@@ -301,7 +301,7 @@ class BudgetGraph:
             state["budget_data"] = {
                 "name": None,
                 "period": "текущий месяц",
-                "income_plan": None,
+                "income_plan": budget_data.get("income_plan"),
                 "category_limits": {}
             }
             return state
@@ -659,7 +659,83 @@ class BudgetGraph:
                         }
                         for transaction in transactions[:5]  # Только 5 последних
                     ]
-            
+
+            elif intent == "delete_transactions":
+                # Удаление транзакций по критериям
+                transaction_data = state.get("transaction_data", {})
+                
+                start_date, end_date = None, None
+                category = None
+                
+                # Определяем период
+                if "date" in transaction_data and transaction_data["date"]:
+                    date_str = transaction_data["date"]
+                    # Парсинг даты - предполагает формат "апрель 2025"
+                    try:
+                        # Примерный код для парсинга даты - может потребовать доработки
+                        month_names = {
+                            "январь": 1, "февраль": 2, "март": 3, "апрель": 4,
+                            "май": 5, "июнь": 6, "июль": 7, "август": 8,
+                            "сентябрь": 9, "октябрь": 10, "ноябрь": 11, "декабрь": 12
+                        }
+                        
+                        month = None
+                        year = None
+                        
+                        for month_name, month_num in month_names.items():
+                            if month_name in date_str.lower():
+                                month = month_num
+                                break
+                                
+                        # Извлекаем год
+                        import re
+                        year_match = re.search(r'\d{4}', date_str)
+                        if year_match:
+                            year = int(year_match.group())
+                        
+                        if month and year:
+                            from calendar import monthrange
+                            days_in_month = monthrange(year, month)[1]
+                            start_date = datetime(year, month, 1, 0, 0, 0)
+                            end_date = datetime(year, month, days_in_month, 23, 59, 59)
+                    except Exception as e:
+                        logger.error(f"Ошибка при парсинге даты: {e}")
+                
+                # Определяем категорию
+                if "category" in transaction_data and transaction_data["category"]:
+                    category = BudgetCategory(transaction_data["category"])
+                
+                # Получаем транзакции по критериям
+                transactions = await self.transaction_repository.get_transactions_for_family(
+                    family_id=family_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                    category=category,
+                    transaction_type=TransactionType.EXPENSE
+                )
+                
+                if not transactions:
+                    operation_result = "не найдены транзакции по указанным критериям"
+                else:
+                    # Удаляем найденные транзакции
+                    deleted_count = 0
+                    total_amount = Decimal('0')
+                    
+                    for transaction in transactions:
+                        # Вся логика обновления бюджета теперь в методе delete_transaction
+                        success = await self.transaction_repository.delete_transaction(transaction.id)
+                        if success:
+                            deleted_count += 1
+                            total_amount += transaction.amount
+                    
+                    operation_metadata["deleted_count"] = deleted_count
+                    operation_metadata["total_amount"] = str(total_amount)
+                    operation_metadata["category"] = category.value if category else None
+                    operation_metadata["period"] = f"{start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}" if start_date and end_date else None
+                    
+                    operation_result = "успешно"
+
+
             elif intent == "create_goal":
                 # Создание финансовой цели
                 goal_data = state.get("goal_data", {})
@@ -1259,6 +1335,10 @@ class BudgetGraph:
         Returns:
             Результат обработки сообщения
         """
+
+        # Логируем входные данные
+        logger.info(f"Входящий запрос в budget_graph: {user_input}")
+
         # Создаем начальное состояние
         initial_state: BudgetStateDict = {
             "user_input": user_input,
@@ -1276,9 +1356,10 @@ class BudgetGraph:
             if "response" not in final_state:
                 # Если графу не удалось сгенерировать ответ, это может означать,
                 # что запрос не связан с бюджетом
+                logger.warning("В результате работы графа отсутствует поле 'response'")
                 return {
                     "is_budget_related": False,
-                    "response": None,
+                    "response": "Извините, я не смог понять ваш запрос, связанный с бюджетом. Пожалуйста, попробуйте переформулировать или уточнить информацию.",
                     "intent": final_state.get("intent", "other"),
                     "confidence": final_state.get("intent_confidence", 0.0)
                 }

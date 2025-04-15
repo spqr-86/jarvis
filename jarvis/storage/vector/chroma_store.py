@@ -21,19 +21,38 @@ def clean_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Очищенные метаданные
     """
-    if not metadata:
+    # Логируем входные данные
+    logger.info(f"Очистка метаданных: {metadata}")
+    
+    if metadata is None:
+        logger.warning("Метаданные равны None, возвращаем пустой словарь")
+        return {}
+    
+    if not isinstance(metadata, dict):
+        logger.error(f"Метаданные не являются словарем: {type(metadata)}, {metadata}")
         return {}
         
     cleaned = {}
     for key, value in metadata.items():
+        logger.info(f"Обработка ключа: {key}, значение: {value}, тип: {type(value)}")
+        
         if value is None:
-            cleaned[key] = ""  # Заменяем None на пустую строку
+            logger.info(f"Значение None для ключа {key}, заменяем на пустую строку")
+            cleaned[key] = ""
         elif isinstance(value, (str, int, float, bool)):
             cleaned[key] = value
         else:
-            # Преобразуем другие типы в строки
-            cleaned[key] = str(value)
+            # Дополнительная проверка перед преобразованием
+            try:
+                logger.info(f"Преобразуем нестандартный тип {type(value)} в строку для ключа {key}")
+                str_value = str(value)
+                cleaned[key] = str_value
+                logger.info(f"Успешно преобразовано в: {str_value}")
+            except Exception as e:
+                logger.error(f"Не удалось преобразовать значение для ключа {key}: {str(e)}")
+                cleaned[key] = "ERROR_CONVERTING"
     
+    logger.info(f"Результат очистки метаданных: {cleaned}")
     return cleaned
 
 
@@ -96,16 +115,43 @@ class VectorStoreService:
             Список идентификаторов добавленных текстов
         """
         try:
+            # Логируем входные данные
+            logger.info(f"Попытка добавить тексты в ChromaDB. Количество текстов: {len(texts)}")
+            logger.info(f"Тексты: {texts}")
+            logger.info(f"Метаданные: {metadatas}")
+            
+            # Проверяем каждый текст на None
+            for i, text in enumerate(texts):
+                if text is None:
+                    logger.error(f"Текст с индексом {i} равен None")
+            
             # Очищаем метаданные от None значений
             cleaned_metadatas = None
             if metadatas:
-                cleaned_metadatas = [clean_metadata(meta) for meta in metadatas]
+                logger.info("Начало очистки метаданных")
+                cleaned_metadatas = []
+                for i, meta in enumerate(metadatas):
+                    logger.info(f"Очистка метаданных [{i}]: {meta}")
+                    try:
+                        cleaned_meta = clean_metadata(meta)
+                        cleaned_metadatas.append(cleaned_meta)
+                        logger.info(f"Успешно очищены метаданные [{i}]: {cleaned_meta}")
+                    except Exception as meta_e:
+                        logger.error(f"Ошибка при очистке метаданных [{i}]: {meta}, ошибка: {str(meta_e)}")
+                        # Вместо поднятия исключения, вставим пустой словарь
+                        cleaned_metadatas.append({})
+            
+            logger.info(f"Очищенные метаданные: {cleaned_metadatas}")
             
             return self.db.add_texts(texts=texts, metadatas=cleaned_metadatas, ids=ids)
         except Exception as e:
             logger.error(f"Ошибка при добавлении текстов в ChromaDB: {str(e)}")
-            raise
-    
+            # Добавим трассировку стека для более подробной информации об ошибке
+            import traceback
+            logger.error(f"Трассировка: {traceback.format_exc()}")
+            # Не позволяем ошибке подняться дальше
+            return []
+        
     async def similarity_search(
         self,
         query: str,

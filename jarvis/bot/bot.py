@@ -114,10 +114,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if user_id not in USER_SESSIONS:
         USER_SESSIONS[user_id] = {
             "chat_history": [],
-            "family_id": family.id
+            "family_id": family.id,
+            "db_user_id": db_user.id,
         }
     else:
         USER_SESSIONS[user_id]["family_id"] = family.id
+        USER_SESSIONS[user_id]["db_user_id"] = db_user.id
     
     # Отправляем приветственное сообщение
     await update.message.reply_text(message)
@@ -162,7 +164,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             USER_SESSIONS[user_id] = {
                 "chat_history": [],
                 "family_id": db_user.family_id,
-                "db_user_id": db_user.id
+                "db_user_id": db_user.id,
             }
         else:
             # Если пользователя нет в базе, предложить зарегистрироваться

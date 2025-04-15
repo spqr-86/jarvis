@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 
 class TransactionData(BaseModel):
     """Модель для извлечения информации о финансовой транзакции из текста."""
-    
-    amount: float = Field(description="Сумма транзакции")
+    amount: Optional[float] = Field(None, description="Сумма транзакции")
     transaction_type: TransactionType = Field(description="Тип транзакции (доход/расход)")
     category: Optional[BudgetCategory] = Field(None, description="Категория транзакции")
     description: Optional[str] = Field(description="Описание транзакции")
@@ -48,7 +47,7 @@ class BudgetData(BaseModel):
     """Модель для извлечения информации о бюджете из текста."""
     
     name: Optional[str] = Field(None, description="Название бюджета")
-    period: str = Field(description="Период бюджета (месяц, год)")
+    period: str = Field(default="текущий месяц", description="Период бюджета")
     income_plan: Optional[float] = Field(None, description="Планируемый доход")
     category_limits: Dict[BudgetCategory, float] = Field(default_factory=dict, description="Лимиты по категориям")
 
@@ -309,6 +308,7 @@ class BudgetIntentClassifier(BaseLangChain):
     - create_budget: Создать бюджет
     - update_budget: Обновить бюджет
     - view_transactions: Просмотреть транзакции
+    - delete_transactions: Удалить транзакции
     - create_goal: Создать финансовую цель
     - update_goal: Обновить финансовую цель
     - view_goals: Просмотреть финансовые цели
@@ -401,9 +401,12 @@ class BudgetResponseGenerator(BaseLangChain):
     Дополнительная информация:
     {additional_info}
     
-    Дай дружелюбный ответ, подтверждающий выполненное действие и предлагающий полезные рекомендации при необходимости.
-    Используй эмодзи для улучшения читаемости и привлекательности ответа.
-    Если операция связана с финансами, добавь небольшой совет по управлению бюджетом.
+    # Инструкции по форматированию
+    Формат бюджета:
+    - Используй заголовок с эмодзи и период бюджета
+    - Представь доходы/расходы в виде сравнения план/факт
+    - Для категорий расходов используй прогресс-бары и цветные индикаторы
+    - Включи краткую рекомендацию по управлению бюджетом в конце
     """
     
     def __init__(self, llm_service: Optional[LLMService] = None):
